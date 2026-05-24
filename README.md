@@ -71,3 +71,36 @@ Pin to a full commit SHA instead of `@v1` for maximum immutability.
 - `node-ci` runs a repo-defined `type-check` script if present (blocking), `eslint`
   (non-blocking), and `npm test` (blocking).
 - `node-ci` / `autofix` accept an optional `node-version` input (default `"20"`).
+
+## Gotchas / Troubleshooting
+
+Hard-won lessons — each of these cost a failed run to discover.
+
+- **`claude-review` needs the Claude GitHub App installed**, not just the secret. Without
+  https://github.com/apps/claude on the repo you get `401: Claude Code is not installed
+  on this repository`. The `ANTHROPIC_API_KEY` secret alone is not enough.
+- **Caller must declare a top-level `permissions:` block.** A reusable workflow cannot have
+  more permission than its caller. If the caller grants nothing, the run fails at startup
+  (the reusables need `id-token: write` + `contents/pull-requests/issues: write`).
+- **`continue-on-error` is NOT valid on a job that `uses:` a reusable workflow** — it causes
+  a `startup_failure` ("workflow file issue"). To make a reusable advisory, put
+  `continue-on-error` on the **step inside the reusable** (that's how `claude-review` is
+  non-blocking).
+- **`claude-review` skips/fails on workflow-changing PRs by design.** Its anti-tampering
+  check requires the running workflow file to match the default branch. On the PR that
+  first *adds* it → skips (green). On a PR that *modifies* `pr-checks.yml` → the action
+  errors; the reusable's `continue-on-error` step keeps the job green. Real reviews run on
+  normal PRs that don't touch the workflow.
+- **Pin consumers to `@v1`, never `@main`.** To publish: `git tag -f v1 && git push -f origin v1`.
+- **`node-ci`/`autofix` set dummy CI env** (DATABASE_URL/AUTH_SECRET/ENCRYPTION_KEY) so
+  Prisma/Auth.js/encryption module-load doesn't crash. CI never touches a real DB.
+- **`autofix` only fixes auto-fixable rules.** `no-unused-vars` and `react-hooks/*` have no
+  fixer, so `eslint --fix` may change nothing. To auto-remove unused imports, add
+  `eslint-plugin-unused-imports` to the repo's eslint config.
+- **Type-check for Next + Vitest:** repo script `"type-check": "next typegen && tsc --noEmit"`
+  (bare `tsc` fails without `next-env.d.ts`), plus a `src/test/vitest-globals.d.ts` with
+  `/// <reference types="vitest/globals" />` so `tsc` sees the test globals (don't set
+  `compilerOptions.types`, it drops the auto-included @types).
+- **`gh run rerun --failed` does not reliably re-resolve `@v1`/`@main` reusables** to their
+  latest commit. Push a new commit (or move the tag) to force a fresh resolution.
+- **Build is intentionally not run here** — Vercel's per-PR preview builds the app.
