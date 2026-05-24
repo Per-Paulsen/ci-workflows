@@ -35,7 +35,11 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm run lint -- --fix
+      - name: eslint --fix
+        # eslint still exits non-zero when non-auto-fixable errors remain; that must not
+        # abort the job before the fixes are committed. autofix is a convenience, not a gate.
+        run: npm run lint -- --fix
+        continue-on-error: true
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "style: apply eslint --fix"
