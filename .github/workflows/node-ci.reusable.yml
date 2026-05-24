@@ -15,6 +15,15 @@ jobs:
   quality:
     name: Lint & Test
     runs-on: ubuntu-latest
+    env:
+      # Harmless CI placeholders so module-load code (Prisma client, Auth.js, encryption)
+      # doesn't crash. CI runs lint + unit tests only and never touches a real DB.
+      # ENCRYPTION_KEY must be 64 hex chars (32 bytes) for aes-256-gcm. A repo that needs
+      # real values can set them as repo secrets and reference them in its own caller.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ci
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/ci
+      AUTH_SECRET: ci-dummy-secret-not-used
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
