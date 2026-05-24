@@ -22,6 +22,12 @@ on:
     branches: [main]
   push:
     branches: [main]
+# A called workflow cannot exceed its caller's permissions; grant the union here.
+permissions:
+  contents: write # autofix
+  pull-requests: write # claude-review
+  issues: write # claude-review
+  id-token: write # claude-review OIDC
 jobs:
   ci:
     uses: Per-Paulsen/ci-workflows/.github/workflows/node-ci.reusable.yml@main
