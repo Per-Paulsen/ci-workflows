@@ -39,12 +39,10 @@ jobs:
     uses: Per-Paulsen/ci-workflows/.github/workflows/gitleaks.reusable.yml@v1
   review:
     if: github.event_name == 'pull_request'
-    continue-on-error: true # advisory; skips on workflow-changing PRs — never blocks
     uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@v1
     secrets: inherit
   autofix:
     if: github.event_name == 'pull_request'
-    continue-on-error: true # advisory, never blocks
     uses: Per-Paulsen/ci-workflows/.github/workflows/autofix.reusable.yml@v1
 ```
 

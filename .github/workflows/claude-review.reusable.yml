@@ -25,6 +25,9 @@ jobs:
           fetch-depth: 0
       - name: Claude review
         if: env.ANTHROPIC_API_KEY != '' # no-op until the secret is configured
+        # Advisory: never fail the job. The action exits non-zero on its workflow-validation
+        # check for PRs that modify the workflow file; review comments are the real output.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
