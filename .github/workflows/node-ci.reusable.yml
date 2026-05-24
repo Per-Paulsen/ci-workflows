@@ -31,6 +31,10 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: npm
       - run: npm ci
+      # Type-check (blocking). Repo-defined `type-check` script, e.g. for Next.js:
+      # "type-check": "next typegen && tsc --noEmit". `--if-present` skips repos without it.
+      - name: Type-check
+        run: npm run type-check --if-present
       # Non-blocking: annotates but does not fail the check. Make it blocking by
       # removing continue-on-error once a repo's lint is clean.
       - name: Lint (non-blocking)

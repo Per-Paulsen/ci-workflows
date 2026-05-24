@@ -22,6 +22,10 @@ on:
     branches: [main]
   push:
     branches: [main]
+# Cancel superseded runs on the same ref (don't waste minutes on rapid pushes).
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
 # A called workflow cannot exceed its caller's permissions; grant the union here.
 permissions:
   contents: write # autofix
@@ -30,16 +34,16 @@ permissions:
   id-token: write # claude-review OIDC
 jobs:
   ci:
-    uses: Per-Paulsen/ci-workflows/.github/workflows/node-ci.reusable.yml@main
+    uses: Per-Paulsen/ci-workflows/.github/workflows/node-ci.reusable.yml@v1
   gitleaks:
-    uses: Per-Paulsen/ci-workflows/.github/workflows/gitleaks.reusable.yml@main
+    uses: Per-Paulsen/ci-workflows/.github/workflows/gitleaks.reusable.yml@v1
   review:
     if: github.event_name == 'pull_request'
-    uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@main
+    uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@v1
     secrets: inherit
   autofix:
     if: github.event_name == 'pull_request'
-    uses: Per-Paulsen/ci-workflows/.github/workflows/autofix.reusable.yml@main
+    uses: Per-Paulsen/ci-workflows/.github/workflows/autofix.reusable.yml@v1
 ```
 
 For a non-Node repo, drop the `ci` and `autofix` jobs (keep `review` + `gitleaks`).
@@ -50,7 +54,20 @@ For a non-Node repo, drop the `ci` and `autofix` jobs (keep `review` + `gitleaks
 - Install the Claude GitHub App once (https://github.com/apps/claude, "All repositories"). Required for `claude-review`; an API key alone is not enough.
 - `claude-review` only runs for real once `pr-checks.yml` is on the repo's **default branch** (a security check skips it on the PR that first introduces it).
 
+## Versioning
+
+Consumers pin to the moving major tag **`@v1`** (recommended), not `@main` — `@main`
+would break every consumer on a bad push. To publish changes here: commit to `main`,
+then move the tag:
+
+```bash
+git tag -f v1 && git push -f origin v1
+```
+
+Pin to a full commit SHA instead of `@v1` for maximum immutability.
+
 ## Notes
 
-- Pin to `@main` for always-latest, or to a tag/SHA for stability.
+- `node-ci` runs a repo-defined `type-check` script if present (blocking), `eslint`
+  (non-blocking), and `npm test` (blocking).
 - `node-ci` / `autofix` accept an optional `node-version` input (default `"20"`).
