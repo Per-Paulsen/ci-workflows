@@ -1,0 +1,51 @@
+name: claude-review (reusable)
+
+# Reusable independent AI review. Call via
+# `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@main`
+# with `secrets: inherit` so ANTHROPIC_API_KEY is forwarded. Non-blocking.
+# Requires the Claude GitHub App installed on the consuming repo.
+
+on:
+  workflow_call: {}
+
+jobs:
+  review:
+    name: Claude Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write # claude-code-action mints its GitHub token via OIDC; required
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Claude review
+        if: env.ANTHROPIC_API_KEY != '' # no-op until the secret is configured
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 12"
+          prompt: |
+            You are reviewing this pull request as an INDEPENDENT reviewer with fresh
+            context. The code may have been written by an AI agent; do not assume it is
+            correct. Catch what the author (human or AI) missed.
+
+            Priorities, highest first:
+            1. Correctness & logic bugs: wrong conditions, unhandled error paths, race
+               conditions, broken edge cases, incorrect async/await.
+            2. Security: injection, missing auth checks, secret/PII exposure, unsafe
+               deserialization.
+            3. Adherence to this repo's conventions in CLAUDE.md and any specs/.
+            4. Missing or weak test coverage for the changed behavior.
+
+            Rules:
+            - You CANNOT run the code; tests/build are the real gates. Flag suspected
+              runtime issues but mark them unverified.
+            - Be concise and high-signal. Skip pure style nits (linters handle those).
+            - Only flag real issues; if the PR looks clean, say so briefly.
+            - For each finding: file:line, severity (blocker/important/minor), the
+              problem, a concrete fix. Use inline comments where possible.

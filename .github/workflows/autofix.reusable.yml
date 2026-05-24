@@ -1,0 +1,35 @@
+name: autofix (reusable)
+
+# Reusable lint auto-fix: runs `eslint --fix` and commits the fixes back to the PR
+# branch. Call via `uses: Per-Paulsen/ci-workflows/.github/workflows/autofix.reusable.yml@main`.
+# Caller should gate this with `if: github.event_name == 'pull_request'`.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version
+        type: string
+        default: "20"
+
+jobs:
+  autofix:
+    name: Lint auto-fix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Skip on forked PRs (no write access to push fixes back).
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint -- --fix
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: apply eslint --fix"

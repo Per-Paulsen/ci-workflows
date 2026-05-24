@@ -1,0 +1,31 @@
+name: node-ci (reusable)
+
+# Reusable: npm ci → lint (non-blocking) + test (blocking). Call from a repo's
+# pr-checks.yml via `uses: Per-Paulsen/ci-workflows/.github/workflows/node-ci.reusable.yml@main`.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version
+        type: string
+        default: "20"
+
+jobs:
+  quality:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      # Non-blocking: annotates but does not fail the check. Make it blocking by
+      # removing continue-on-error once a repo's lint is clean.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
+      - name: Test
+        run: npm run test
