@@ -3,7 +3,9 @@ name: claude-review (reusable)
 # Reusable independent AI review. Call via
 # `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@main`
 # with `secrets: inherit` so ANTHROPIC_API_KEY is forwarded. Non-blocking.
-# Requires the Claude GitHub App installed on the consuming repo.
+# Auth is ANTHROPIC_API_KEY only: the review step is gated on it and mints its own
+# GitHub token via OIDC. The Claude GitHub App is NOT needed for this automatic PR
+# review; it only matters for interactive @claude mentions.
 
 on:
   workflow_call: {}
