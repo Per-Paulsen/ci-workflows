@@ -1,0 +1,98 @@
+name: live-e2e (reusable)
+
+# Reusable real-dependency E2E job for Per's `/live` skill.
+#
+# What it does: set up the repo's toolchain, install the Doppler CLI, then run the
+# repo's E2E command WITH `doppler run --` so real secrets are injected at runtime.
+# Only ONE secret reaches GitHub (a Doppler service token); every real API key stays
+# in Doppler and is fetched through it. Nothing is written to disk or the repo.
+#
+# Trigger: on-demand only. A repo's `live.yml` caller exposes `workflow_dispatch`;
+# the `/live` skill kicks it with `gh workflow run` and watches it live. NEVER on a
+# schedule (deliberate: Per wants to be present and watch the run).
+#
+# Call from a repo's `.github/workflows/live.yml`:
+#   jobs:
+#     live:
+#       uses: Per-Paulsen/ci-workflows/.github/workflows/live.reusable.yml@v1
+#       with:
+#         language: python            # python | node | none
+#         e2e-command: uv run pytest -m e2e
+#       secrets: inherit              # forwards DOPPLER_TOKEN
+
+on:
+  workflow_call:
+    inputs:
+      e2e-command:
+        description: >-
+          The E2E command, run WITH a `doppler run --` prefix (the job adds the prefix).
+          e.g. "uv run pytest -m e2e" or "npm run test:e2e".
+        type: string
+        required: true
+      language:
+        description: Toolchain to set up before the run. One of python | node | none.
+        type: string
+        default: python
+      python-version:
+        description: Python version when language=python.
+        type: string
+        default: "3.12"
+      node-version:
+        description: Node version when language=node.
+        type: string
+        default: "20"
+      install-command:
+        description: >-
+          Dependency install run BEFORE the E2E, WITHOUT Doppler. Defaults per language
+          ("uv sync" / "npm ci"). Override for non-standard setups.
+        type: string
+        default: ""
+      runner:
+        description: GitHub runner image.
+        type: string
+        default: ubuntu-latest
+    secrets:
+      DOPPLER_TOKEN:
+        description: >-
+          Doppler service token, scoped to this repo's Doppler project+config. The ONLY
+          secret CI needs; all real keys stay in Doppler and are resolved through it.
+        required: true
+
+jobs:
+  live-e2e:
+    name: Live E2E (real deps via Doppler)
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- toolchain (per language) ---
+      - name: Set up Python (uv)
+        if: inputs.language == 'python'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Pin Python + install deps
+        if: inputs.language == 'python'
+        run: |
+          uv python pin ${{ inputs.python-version }}
+          ${{ inputs.install-command || 'uv sync' }}
+
+      - name: Set up Node
+        if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - name: Install deps
+        if: inputs.language == 'node'
+        run: ${{ inputs.install-command || 'npm ci' }}
+
+      # --- Doppler: install CLI, then run the E2E with real secrets injected ---
+      # Pinned to the current major tag v4 (release v4.0.1, 2026-03-05). Verified via GitHub API.
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v4
+
+      - name: Run E2E against real dependencies
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: doppler run --token="$DOPPLER_TOKEN" -- ${{ inputs.e2e-command }}
