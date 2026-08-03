@@ -33,7 +33,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
-          claude_args: "--max-turns 12"
+          # No turn cap: a capped reviewer dies mid-read on large PRs while the check
+          # stays green (2026-08-03 incident, per-claude-skills PR 2). The action runs
+          # to natural completion; no numeric limits without an explicit decision.
           prompt: |
             You are reviewing this pull request as an INDEPENDENT reviewer with fresh
             context. The code may have been written by an AI agent; do not assume it is
