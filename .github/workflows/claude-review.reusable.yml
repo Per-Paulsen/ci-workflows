@@ -36,6 +36,11 @@ jobs:
           # No turn cap: a capped reviewer dies mid-read on large PRs while the check
           # stays green (2026-08-03 incident, per-claude-skills PR 2). The action runs
           # to natural completion; no numeric limits without an explicit decision.
+          # allowedTools per the official pr-review example: without it the reviewer
+          # is DENIED the comment-posting tools and silently posts nothing (same
+          # incident; permission_denials in the run log).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
           prompt: |
             You are reviewing this pull request as an INDEPENDENT reviewer with fresh
             context. The code may have been written by an AI agent; do not assume it is
