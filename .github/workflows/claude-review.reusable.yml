@@ -2,10 +2,18 @@ name: claude-review (reusable)
 
 # Reusable independent AI review. Call via
 # `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@main`
-# with `secrets: inherit` so ANTHROPIC_API_KEY is forwarded. Non-blocking.
-# Auth is ANTHROPIC_API_KEY only: the review step is gated on it and mints its own
-# GitHub token via OIDC. The Claude GitHub App is NOT needed for this automatic PR
-# review; it only matters for interactive @claude mentions.
+# with `secrets: inherit`. Non-blocking.
+#
+# Auth, in order of preference:
+#   1. CLAUDE_CODE_OAUTH_TOKEN (repo secret): bills the review against the Claude
+#      subscription's dedicated programmatic monthly credit instead of pay-per-use
+#      API tokens. Created once via `claude setup-token`.
+#   2. ANTHROPIC_API_KEY (repo secret): pay-per-use fallback. Runs when no OAuth
+#      token is configured, or when the subscription-credit attempt failed (e.g.
+#      monthly credit exhausted, token expired).
+# With neither secret set, the job no-ops cleanly.
+# The action mints its own GitHub token via OIDC; the Claude GitHub App is NOT
+# needed for this automatic PR review (only for interactive @claude mentions).
 
 on:
   workflow_call: {}
@@ -21,43 +29,56 @@ jobs:
       id-token: write # claude-code-action mints its GitHub token via OIDC; required
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Shared review config for both auth paths (GitHub Actions has no YAML anchors).
+      # No turn cap: a capped reviewer dies mid-read on large PRs while the check
+      # stays green (2026-08-03 incident, per-claude-skills PR 2). No numeric limits
+      # without an explicit decision.
+      # allowedTools per the official pr-review example: without it the reviewer
+      # is DENIED the comment-posting tools and silently posts nothing (same
+      # incident; permission_denials in the run log).
+      REVIEW_CLAUDE_ARGS: |
+        --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+      REVIEW_PROMPT: |
+        You are reviewing this pull request as an INDEPENDENT reviewer with fresh
+        context. The code may have been written by an AI agent; do not assume it is
+        correct. Catch what the author (human or AI) missed.
+
+        Priorities, highest first:
+        1. Correctness & logic bugs: wrong conditions, unhandled error paths, race
+           conditions, broken edge cases, incorrect async/await.
+        2. Security: injection, missing auth checks, secret/PII exposure, unsafe
+           deserialization.
+        3. Adherence to this repo's conventions in CLAUDE.md and any specs/.
+        4. Missing or weak test coverage for the changed behavior.
+
+        Rules:
+        - You CANNOT run the code; tests/build are the real gates. Flag suspected
+          runtime issues but mark them unverified.
+        - Be concise and high-signal. Skip pure style nits (linters handle those).
+        - Only flag real issues; if the PR looks clean, say so briefly.
+        - For each finding: file:line, severity (blocker/important/minor), the
+          problem, a concrete fix. Use inline comments where possible.
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Claude review
-        if: env.ANTHROPIC_API_KEY != '' # no-op until the secret is configured
+      - name: Claude review (subscription credit)
+        id: review_oauth
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         # Advisory: never fail the job. The action exits non-zero on its workflow-validation
         # check for PRs that modify the workflow file; review comments are the real output.
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
+          claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
+          prompt: ${{ env.REVIEW_PROMPT }}
+      - name: Claude review (API key fallback)
+        if: (env.CLAUDE_CODE_OAUTH_TOKEN == '' || steps.review_oauth.outcome == 'failure') && env.ANTHROPIC_API_KEY != ''
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
           anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
-          # No turn cap: a capped reviewer dies mid-read on large PRs while the check
-          # stays green (2026-08-03 incident, per-claude-skills PR 2). The action runs
-          # to natural completion; no numeric limits without an explicit decision.
-          # allowedTools per the official pr-review example: without it the reviewer
-          # is DENIED the comment-posting tools and silently posts nothing (same
-          # incident; permission_denials in the run log).
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-          prompt: |
-            You are reviewing this pull request as an INDEPENDENT reviewer with fresh
-            context. The code may have been written by an AI agent; do not assume it is
-            correct. Catch what the author (human or AI) missed.
-
-            Priorities, highest first:
-            1. Correctness & logic bugs: wrong conditions, unhandled error paths, race
-               conditions, broken edge cases, incorrect async/await.
-            2. Security: injection, missing auth checks, secret/PII exposure, unsafe
-               deserialization.
-            3. Adherence to this repo's conventions in CLAUDE.md and any specs/.
-            4. Missing or weak test coverage for the changed behavior.
-
-            Rules:
-            - You CANNOT run the code; tests/build are the real gates. Flag suspected
-              runtime issues but mark them unverified.
-            - Be concise and high-signal. Skip pure style nits (linters handle those).
-            - Only flag real issues; if the PR looks clean, say so briefly.
-            - For each finding: file:line, severity (blocker/important/minor), the
-              problem, a concrete fix. Use inline comments where possible.
+          claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
+          prompt: ${{ env.REVIEW_PROMPT }}
