@@ -1,7 +1,7 @@
 name: claude-review (reusable)
 
 # Reusable independent AI review. Call via
-# `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@main`
+# `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@v1`
 # with `secrets: inherit`. Non-blocking.
 #
 # Auth, in order of preference:
@@ -12,6 +12,13 @@ name: claude-review (reusable)
 #      token is configured, or when the subscription-credit attempt failed (e.g.
 #      monthly credit exhausted, token expired).
 # With neither secret set, the job no-ops cleanly.
+# Accepted trade-off: the failure signal cannot distinguish WHY the OAuth attempt
+# failed, so an OAuth run that fails after already posting comments triggers a
+# paid re-review with possibly duplicate comments. Rare, and preferred over
+# silently losing reviews when the monthly credit runs out.
+# Secrets are passed ONLY via `with:` to the action, never as job env: job env
+# would put them in every step's process tree, including the reviewer's own
+# allowed Bash, where a prompt-injected PR could exfiltrate them into a comment.
 # The action mints its own GitHub token via OIDC; the Claude GitHub App is NOT
 # needed for this automatic PR review (only for interactive @claude mentions).
 
@@ -28,8 +35,9 @@ jobs:
       issues: write
       id-token: write # claude-code-action mints its GitHub token via OIDC; required
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # Presence flags only; the secret VALUES stay out of the job env (see header).
+      HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
       # Shared review config for both auth paths (GitHub Actions has no YAML anchors).
       # No turn cap: a capped reviewer dies mid-read on large PRs while the check
       # stays green (2026-08-03 incident, per-claude-skills PR 2). No numeric limits
@@ -61,24 +69,25 @@ jobs:
           problem, a concrete fix. Use inline comments where possible.
     steps:
       - uses: actions/checkout@v4
+        if: env.HAS_OAUTH == 'true' || env.HAS_KEY == 'true'
         with:
           fetch-depth: 0
       - name: Claude review (subscription credit)
         id: review_oauth
-        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        if: env.HAS_OAUTH == 'true'
         # Advisory: never fail the job. The action exits non-zero on its workflow-validation
         # check for PRs that modify the workflow file; review comments are the real output.
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ env.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
           prompt: ${{ env.REVIEW_PROMPT }}
       - name: Claude review (API key fallback)
-        if: (env.CLAUDE_CODE_OAUTH_TOKEN == '' || steps.review_oauth.outcome == 'failure') && env.ANTHROPIC_API_KEY != ''
+        if: (env.HAS_OAUTH == 'false' || steps.review_oauth.outcome == 'failure') && env.HAS_KEY == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
           prompt: ${{ env.REVIEW_PROMPT }}
