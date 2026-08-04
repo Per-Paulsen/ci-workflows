@@ -140,8 +140,10 @@ jobs:
 
           # Auth path actually taken, from step outcomes (not secret presence).
           if [ "$OAUTH_OUTCOME" = "success" ]; then AUTH="subscription-oauth"
-          elif [ -n "$KEY_OUTCOME" ] && [ "$KEY_OUTCOME" != "skipped" ]; then AUTH="api-key"
-          else AUTH="none (no attempt succeeded)"; fi
+          elif [ "$KEY_OUTCOME" = "success" ]; then AUTH="api-key"
+          elif [ -n "$KEY_OUTCOME" ] && [ "$KEY_OUTCOME" != "skipped" ]; then AUTH="api-key (attempt failed)"
+          elif [ "$OAUTH_OUTCOME" = "failure" ]; then AUTH="subscription-oauth (attempt failed)"
+          else AUTH="none (no attempt ran)"; fi
 
           # Count review artifacts since run start. --paginate emits one count
           # per page, so counts are summed; awk also sanitizes empty/partial
@@ -153,7 +155,7 @@ jobs:
             out=$(gh api "$1" --paginate --jq "$2" 2>/dev/null) || { echo 1 >> /tmp/lookup_failed; out=""; }
             printf '%s\n' "$out" | awk '{s+=$1} END {print s+0}'
           }
-          AUTHOR="((.user.login // \"\") | IN(\"claude[bot]\", \"claude\"))"
+          AUTHOR="((.user.login // \"\") | ascii_downcase | IN(\"claude[bot]\", \"claude\"))"
           ic=$(count "repos/$REPO/issues/$PR/comments" "[.[] | select($AUTHOR and .created_at >= \"$SINCE\")] | length")
           rc=$(count "repos/$REPO/pulls/$PR/comments" "[.[] | select($AUTHOR and .created_at >= \"$SINCE\")] | length")
           rv=$(count "repos/$REPO/pulls/$PR/reviews" "[.[] | select($AUTHOR and (.submitted_at // \"\") >= \"$SINCE\")] | length")
@@ -178,13 +180,15 @@ jobs:
           post() { gh pr comment "$PR" --repo "$REPO" --body-file "$1" || echo "::warning::posting the evidence comment failed"; }
 
           if [ "$total" -gt 0 ]; then
-            printf '%s\n' "$evidence" > /tmp/evidence.md
+            { printf '%s\n' "$evidence"
+              if [ -s /tmp/lookup_failed ]; then printf '\n%s\n' "Note: some artifact lookups failed; counts may be understated."; fi
+            } > /tmp/evidence.md
             post /tmp/evidence.md
             echo "review evidence ok ($total artifact(s))"; exit 0
           fi
 
           if [ -s /tmp/lookup_failed ]; then
-            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: GitHub API lookups failed, so artifact presence could not be established. Not claiming a contract breach."
+            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: GitHub API lookups failed, so artifact presence could not be established (failed lookups read as 0 in the counts below). Not claiming a contract breach."
               printf '%s\n' "$evidence"; } > /tmp/evidence.md
             post /tmp/evidence.md
             echo "::warning::evidence lookups failed; verification inconclusive"; exit 0
@@ -193,7 +197,7 @@ jobs:
           # Legitimate no-op: PRs modifying workflow files (action security validation).
           wf_pr=$(count "repos/$REPO/pulls/$PR/files" '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
           if [ -s /tmp/lookup_failed ]; then
-            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: the changed-files lookup failed. Not claiming a contract breach."
+            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: the changed-files lookup failed (failed lookups read as 0 in the counts below). Not claiming a contract breach."
               printf '%s\n' "$evidence"; } > /tmp/evidence.md
             post /tmp/evidence.md
             echo "::warning::files lookup failed; verification inconclusive"; exit 0
