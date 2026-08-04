@@ -2,7 +2,9 @@ name: claude-review (reusable)
 
 # Reusable independent AI review. Call via
 # `uses: Per-Paulsen/ci-workflows/.github/workflows/claude-review.reusable.yml@v1`
-# with `secrets: inherit`. Non-blocking.
+# with `secrets: inherit`. Non-blocking for code verdicts; the only red this
+# job produces is the evidence step's "review infrastructure broke its
+# contract" signal.
 #
 # Auth, in order of preference:
 #   1. CLAUDE_CODE_OAUTH_TOKEN (repo secret): bills the review against the Claude
@@ -69,6 +71,7 @@ jobs:
         - The diff is the starting point, not the boundary: read any repo file
           (Read/Grep/Glob) the change touches or relies on.
         - Be concise and high-signal. Skip pure style nits (linters handle those).
+        - Write every comment in English; never use em dashes.
         - Only flag real issues. For each finding: file:line, severity
           (blocker/important/minor), the problem, a concrete fix. Use inline
           comments where possible.
@@ -97,6 +100,7 @@ jobs:
           claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
           prompt: ${{ env.REVIEW_PROMPT }}
       - name: Claude review (API key fallback)
+        id: review_key
         if: (env.HAS_OAUTH == 'false' || steps.review_oauth.outcome == 'failure') && env.HAS_KEY == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
@@ -114,13 +118,18 @@ jobs:
       # job: red means "review infrastructure broke its contract", never "the
       # code is bad". Known no-op cases stay green and documented: PRs that
       # modify workflow files (the action's own security validation) get a
-      # notice comment; missing secrets never reach this step.
+      # notice comment; failed API lookups report "inconclusive" instead of a
+      # false breach claim; missing secrets never reach this step.
+      # Concurrency note: artifact counting is windowed by run-start time; the
+      # standard caller (pr-checks.yml) cancels superseded runs per ref, which
+      # keeps concurrent same-PR reviews from cross-counting.
       - name: Verify review evidence
         if: env.HAS_OAUTH == 'true' || env.HAS_KEY == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          AUTH_PATH: ${{ env.HAS_OAUTH == 'true' && 'subscription-oauth' || 'api-key' }}
+          OAUTH_OUTCOME: ${{ steps.review_oauth.outcome }}
+          KEY_OUTCOME: ${{ steps.review_key.outcome }}
         run: |
           set -u
           REPO="$GITHUB_REPOSITORY"
@@ -129,58 +138,89 @@ jobs:
           SINCE="$REVIEW_RUN_START"
           RUN_URL="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
 
-          # 1. Review artifacts since run start (author matching "claude").
-          ic=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and .created_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
-          rc=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and .created_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
-          rv=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and (.submitted_at // \"\") >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+          # Auth path actually taken, from step outcomes (not secret presence).
+          if [ "$OAUTH_OUTCOME" = "success" ]; then AUTH="subscription-oauth"
+          elif [ -n "$KEY_OUTCOME" ] && [ "$KEY_OUTCOME" != "skipped" ]; then AUTH="api-key"
+          else AUTH="none (no attempt succeeded)"; fi
+
+          # Count review artifacts since run start. --paginate emits one count
+          # per page, so counts are summed; awk also sanitizes empty/partial
+          # output. Lookup failures are recorded in a marker file (a function
+          # in command substitution runs in a subshell, so a plain variable
+          # would not survive) and never silently read as zero.
+          : > /tmp/lookup_failed
+          count() {
+            out=$(gh api "$1" --paginate --jq "$2" 2>/dev/null) || { echo 1 >> /tmp/lookup_failed; out=""; }
+            printf '%s\n' "$out" | awk '{s+=$1} END {print s+0}'
+          }
+          AUTHOR="((.user.login // \"\") | IN(\"claude[bot]\", \"claude\"))"
+          ic=$(count "repos/$REPO/issues/$PR/comments" "[.[] | select($AUTHOR and .created_at >= \"$SINCE\")] | length")
+          rc=$(count "repos/$REPO/pulls/$PR/comments" "[.[] | select($AUTHOR and .created_at >= \"$SINCE\")] | length")
+          rv=$(count "repos/$REPO/pulls/$PR/reviews" "[.[] | select($AUTHOR and (.submitted_at // \"\") >= \"$SINCE\")] | length")
           total=$((ic + rc + rv))
 
-          # 2. Activity metrics from the agent execution log (best effort).
-          EXEC=$(find /home/runner/work/_temp -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
+          # Activity metrics from the agent execution log (best effort; na = unknown).
+          EXEC=$(find "${RUNNER_TEMP:-/home/runner/work/_temp}" -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
           turns=na; denials=na; cost=na; reads=na; diff_fetched=na
           if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
             turns=$(jq -r '[.[] | select(.type=="result")] | last | .num_turns // "na"' "$EXEC" 2>/dev/null || echo na)
             denials=$(jq -r '[.[] | select(.type=="result")] | last | .permission_denials_count // "na"' "$EXEC" 2>/dev/null || echo na)
             cost=$(jq -r '[.[] | select(.type=="result")] | last | .total_cost_usd // "na"' "$EXEC" 2>/dev/null || echo na)
             reads=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Read")] | length' "$EXEC" 2>/dev/null || echo na)
-            dcount=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | select(test("gh pr diff"))] | length' "$EXEC" 2>/dev/null || echo 0)
-            case "$dcount" in (0) diff_fetched=no ;; (na) diff_fetched=na ;; (*) diff_fetched=yes ;; esac
+            dcount=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | select(test("gh pr diff"))] | length' "$EXEC" 2>/dev/null || echo na)
+            case "$dcount" in (na) diff_fetched=na ;; (0) diff_fetched=no ;; (*) diff_fetched=yes ;; esac
           fi
 
           evidence="### Claude review evidence ([run]($RUN_URL))
           Artifacts since run start: $ic PR comment(s), $rc inline comment(s), $rv review object(s).
-          Activity: $turns turns, $reads file(s) read, diff fetched: $diff_fetched, $denials permission denial(s), cost USD $cost, auth: $AUTH_PATH."
+          Activity: $turns turns, $reads file(s) read, diff fetched: $diff_fetched, $denials permission denial(s), cost USD $cost, auth: $AUTH."
+
+          post() { gh pr comment "$PR" --repo "$REPO" --body-file "$1" || echo "::warning::posting the evidence comment failed"; }
 
           if [ "$total" -gt 0 ]; then
-            gh pr comment "$PR" --repo "$REPO" --body "$evidence" || true
+            printf '%s\n' "$evidence" > /tmp/evidence.md
+            post /tmp/evidence.md
             echo "review evidence ok ($total artifact(s))"; exit 0
           fi
 
-          # 3. Legitimate no-op: PRs modifying workflow files (action security validation).
-          wf_pr=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length' 2>/dev/null || echo 0)
-          if [ "$wf_pr" -gt 0 ]; then
-            gh pr comment "$PR" --repo "$REPO" --body "Claude review skipped: this PR modifies workflow files, so the review action no-ops as a security validation.
+          if [ -s /tmp/lookup_failed ]; then
+            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: GitHub API lookups failed, so artifact presence could not be established. Not claiming a contract breach."
+              printf '%s\n' "$evidence"; } > /tmp/evidence.md
+            post /tmp/evidence.md
+            echo "::warning::evidence lookups failed; verification inconclusive"; exit 0
+          fi
 
-          $evidence" || true
+          # Legitimate no-op: PRs modifying workflow files (action security validation).
+          wf_pr=$(count "repos/$REPO/pulls/$PR/files" '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
+          if [ -s /tmp/lookup_failed ]; then
+            { printf '%s\n\n' "Review evidence verification INCONCLUSIVE: the changed-files lookup failed. Not claiming a contract breach."
+              printf '%s\n' "$evidence"; } > /tmp/evidence.md
+            post /tmp/evidence.md
+            echo "::warning::files lookup failed; verification inconclusive"; exit 0
+          fi
+          if [ "$wf_pr" -gt 0 ]; then
+            { printf '%s\n\n' "Claude review skipped: this PR modifies workflow files, so the review action no-ops as a security validation."
+              printf '%s\n' "$evidence"; } > /tmp/evidence.md
+            post /tmp/evidence.md
             echo "workflow-file PR; documented no-op"; exit 0
           fi
 
-          # 4. Contract broken: rescue-post the agent's final text, then fail.
+          # Contract broken: rescue-post the agent's final text, then fail.
           final=""
           if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
-            final=$(jq -r '[.[] | select(.type=="assistant")] | last | .message.content[]? | select(.type=="text") | .text' "$EXEC" 2>/dev/null | head -c 60000 || true)
+            # Truncation rationale (explicit decision): GitHub caps comment
+            # bodies at 65536 chars; 60000 leaves headroom for the wrapper.
+            # iconv drops a mid-character UTF-8 tail the byte cut may leave.
+            final=$(jq -r '[.[] | select(.type=="assistant")] | last | .message.content[]? | select(.type=="text") | .text' "$EXEC" 2>/dev/null | head -c 60000 | iconv -f UTF-8 -t UTF-8 -c || true)
           fi
           {
-            echo "**Review contract broken: the reviewer posted no verdict itself.** This check goes red for that reason; red means infrastructure failure, not a code verdict."
-            echo
-            echo "$evidence"
+            printf '%s\n\n' "**Review contract broken: the reviewer posted no verdict itself.** This check goes red for that reason; red means infrastructure failure, not a code verdict."
+            printf '%s\n' "$evidence"
             if [ -n "$final" ]; then
-              echo
-              echo "Rescue-posted final text of the reviewer:"
-              echo
-              echo "$final"
+              printf '\n%s\n\n' "Rescue-posted final text of the reviewer:"
+              printf '%s\n' "$final"
             fi
           } > /tmp/review-rescue.md
-          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/review-rescue.md || true
+          post /tmp/review-rescue.md
           echo "::error::Claude review posted no artifact; rescue comment posted, failing the evidence check."
           exit 1
