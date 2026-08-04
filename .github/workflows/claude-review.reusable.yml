@@ -82,6 +82,9 @@ jobs:
         if: env.HAS_OAUTH == 'true' || env.HAS_KEY == 'true'
         with:
           fetch-depth: 0
+      - name: Mark review run start
+        if: env.HAS_OAUTH == 'true' || env.HAS_KEY == 'true'
+        run: echo "REVIEW_RUN_START=$(date -u +%FT%TZ)" >> "$GITHUB_ENV"
       - name: Claude review (subscription credit)
         id: review_oauth
         if: env.HAS_OAUTH == 'true'
@@ -101,3 +104,83 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
           prompt: ${{ env.REVIEW_PROMPT }}
+      # Machine evidence contract (2026-08-04): the reviewer's discipline is a
+      # prompt and therefore not a guarantee. This deterministic step enforces
+      # the contract instead: after every run there must be a review artifact
+      # on the PR (comment, inline comment, or review object). It always posts
+      # an evidence log (what the agent actually did: turns, files read, diff
+      # fetched, denials, cost, auth path). If no artifact exists, it
+      # rescue-posts the agent's otherwise-invisible final text and FAILS the
+      # job: red means "review infrastructure broke its contract", never "the
+      # code is bad". Known no-op cases stay green and documented: PRs that
+      # modify workflow files (the action's own security validation) get a
+      # notice comment; missing secrets never reach this step.
+      - name: Verify review evidence
+        if: env.HAS_OAUTH == 'true' || env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          AUTH_PATH: ${{ env.HAS_OAUTH == 'true' && 'subscription-oauth' || 'api-key' }}
+        run: |
+          set -u
+          REPO="$GITHUB_REPOSITORY"
+          PR="${PR_NUMBER:-}"
+          [ -n "$PR" ] || { echo "no PR context; nothing to verify"; exit 0; }
+          SINCE="$REVIEW_RUN_START"
+          RUN_URL="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
+
+          # 1. Review artifacts since run start (author matching "claude").
+          ic=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and .created_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+          rc=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and .created_at >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+          rv=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --jq "[.[] | select((.user.login|test(\"claude\";\"i\")) and (.submitted_at // \"\") >= \"$SINCE\")] | length" 2>/dev/null || echo 0)
+          total=$((ic + rc + rv))
+
+          # 2. Activity metrics from the agent execution log (best effort).
+          EXEC=$(find /home/runner/work/_temp -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
+          turns=na; denials=na; cost=na; reads=na; diff_fetched=na
+          if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
+            turns=$(jq -r '[.[] | select(.type=="result")] | last | .num_turns // "na"' "$EXEC" 2>/dev/null || echo na)
+            denials=$(jq -r '[.[] | select(.type=="result")] | last | .permission_denials_count // "na"' "$EXEC" 2>/dev/null || echo na)
+            cost=$(jq -r '[.[] | select(.type=="result")] | last | .total_cost_usd // "na"' "$EXEC" 2>/dev/null || echo na)
+            reads=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Read")] | length' "$EXEC" 2>/dev/null || echo na)
+            dcount=$(jq -r '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | select(test("gh pr diff"))] | length' "$EXEC" 2>/dev/null || echo 0)
+            case "$dcount" in (0) diff_fetched=no ;; (na) diff_fetched=na ;; (*) diff_fetched=yes ;; esac
+          fi
+
+          evidence="### Claude review evidence ([run]($RUN_URL))
+          Artifacts since run start: $ic PR comment(s), $rc inline comment(s), $rv review object(s).
+          Activity: $turns turns, $reads file(s) read, diff fetched: $diff_fetched, $denials permission denial(s), cost USD $cost, auth: $AUTH_PATH."
+
+          if [ "$total" -gt 0 ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "$evidence" || true
+            echo "review evidence ok ($total artifact(s))"; exit 0
+          fi
+
+          # 3. Legitimate no-op: PRs modifying workflow files (action security validation).
+          wf_pr=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length' 2>/dev/null || echo 0)
+          if [ "$wf_pr" -gt 0 ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Claude review skipped: this PR modifies workflow files, so the review action no-ops as a security validation.
+
+          $evidence" || true
+            echo "workflow-file PR; documented no-op"; exit 0
+          fi
+
+          # 4. Contract broken: rescue-post the agent's final text, then fail.
+          final=""
+          if [ -n "$EXEC" ] && [ -f "$EXEC" ]; then
+            final=$(jq -r '[.[] | select(.type=="assistant")] | last | .message.content[]? | select(.type=="text") | .text' "$EXEC" 2>/dev/null | head -c 60000 || true)
+          fi
+          {
+            echo "**Review contract broken: the reviewer posted no verdict itself.** This check goes red for that reason; red means infrastructure failure, not a code verdict."
+            echo
+            echo "$evidence"
+            if [ -n "$final" ]; then
+              echo
+              echo "Rescue-posted final text of the reviewer:"
+              echo
+              echo "$final"
+            fi
+          } > /tmp/review-rescue.md
+          gh pr comment "$PR" --repo "$REPO" --body-file /tmp/review-rescue.md || true
+          echo "::error::Claude review posted no artifact; rescue comment posted, failing the evidence check."
+          exit 1
