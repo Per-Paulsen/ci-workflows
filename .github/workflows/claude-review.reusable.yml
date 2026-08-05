@@ -50,9 +50,16 @@ jobs:
       # 2026-08-04 (per-claude-skills PR 3): they were never in the list, so the
       # checked-out repo was unreadable and the diff was the de-facto boundary
       # (14 permission denials in that run's log).
+      # PR context is injected deterministically into the prompt (repo + PR number +
+      # fetch commands): the action does NOT provide it to custom prompts, and a
+      # reviewer that has to guess the PR number dies asking for it (2026-08-06,
+      # engine-testbed PR 4; reproducible first-run failure class).
       REVIEW_CLAUDE_ARGS: |
         --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
       REVIEW_PROMPT: |
+        You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+        FIRST fetch the PR description with "gh pr view ${{ github.event.pull_request.number }}" and the complete diff with "gh pr diff ${{ github.event.pull_request.number }}"; base every finding on that diff.
+
         You are reviewing this pull request as an INDEPENDENT reviewer with fresh
         context. The code may have been written by an AI agent; do not assume it is
         correct. Catch what the author (human or AI) missed.
